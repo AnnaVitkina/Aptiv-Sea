@@ -2,6 +2,13 @@
 
 Run: python format_rates.py
 """
+import sys, os
+try:
+    _scripts_dir = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    _scripts_dir = "/content/drive/Shareddrives/FA Ops Europe: Rate Maintenance Team /Documents/AI Adoption RMT/RMT_APTIV_VERSIGENT/Aptiv_Sea"
+if _scripts_dir not in sys.path:
+    sys.path.insert(0, _scripts_dir)
 
 import math
 import pandas as pd
