@@ -2,9 +2,9 @@
 
 from pathlib import Path
 
-COLAB_INPUT_DIR = "/content/drive/Shareddrives/FA Ops Europe: Rate Maintenance Team /Documents/AI Adoption RMT/RMT/input json"
-COLAB_OUTPUT_DIR = "/content/drive/Shareddrives/FA Ops Europe: Rate Maintenance Team /Documents/AI Adoption RMT/RMT/output"
-COLAB_PROCESSING_DIR = "/content/drive/Shareddrives/FA Ops Europe: Rate Maintenance Team /Documents/AI Adoption RMT/RMT/processing"
+COLAB_INPUT_DIR = "/content/drive/Shareddrives/FA Ops Europe: Rate Maintenance Team /Documents/AI Adoption RMT/RMT_APTIV_VERSIGENT/RMT_Air/input"
+COLAB_OUTPUT_DIR = "/content/drive/Shareddrives/FA Ops Europe: Rate Maintenance Team /Documents/AI Adoption RMT/RMT_APTIV_VERSIGENT/RMT_Air/output"
+COLAB_PROCESSING_DIR = "/content/drive/Shareddrives/FA Ops Europe: Rate Maintenance Team /Documents/AI Adoption RMT/RMT_APTIV_VERSIGENT/RMT_Air/processing"
 
 def _is_colab() -> bool:
     try:
