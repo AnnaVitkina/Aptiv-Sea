@@ -6,7 +6,16 @@ import sys, os
 try:
     _scripts_dir = os.path.dirname(os.path.abspath(__file__))
 except NameError:
-    _scripts_dir = "/content/drive/Shareddrives/FA Ops Europe: Rate Maintenance Team /Documents/AI Adoption RMT/RMT_APTIV_VERSIGENT/Aptiv_Sea"
+    # exec(open(...)) in Colab — __file__ is not defined; find scripts dir
+    _scripts_dir = None
+    for _candidate in [
+        "/content/Aptiv-Sea",
+    ]:
+        if os.path.isfile(os.path.join(_candidate, "config.py")):
+            _scripts_dir = _candidate
+            break
+    if _scripts_dir is None:
+        _scripts_dir = os.getcwd()
 if _scripts_dir not in sys.path:
     sys.path.insert(0, _scripts_dir)
 
