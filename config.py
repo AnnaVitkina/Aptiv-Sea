@@ -1,5 +1,7 @@
 """Shared path configuration — auto-detects Google Colab vs local machine."""
 
+import sys
+import os
 from pathlib import Path
 
 COLAB_INPUT_DIR = "/content/drive/Shareddrives/FA Ops Europe: Rate Maintenance Team /Documents/AI Adoption RMT/RMT_APTIV_VERSIGENT/RMT_Sea/input"
