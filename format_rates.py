@@ -2,6 +2,8 @@
 
 Run: python format_rates.py
 """
+
+# --- path bootstrap (must be before any local imports) ---
 import sys, os
 try:
     _scripts_dir = os.path.dirname(os.path.abspath(__file__))
@@ -10,6 +12,8 @@ except NameError:
     _scripts_dir = None
     for _candidate in [
         "/content/Aptiv-Sea",
+        "/content/drive/Shareddrives/FA Ops Europe: Rate Maintenance Team "
+        "/Documents/AI Adoption RMT/RMT/Aptiv Sea",
     ]:
         if os.path.isfile(os.path.join(_candidate, "config.py")):
             _scripts_dir = _candidate
@@ -18,11 +22,11 @@ except NameError:
         _scripts_dir = os.getcwd()
 if _scripts_dir not in sys.path:
     sys.path.insert(0, _scripts_dir)
+# --------------------------------------------------------
 
 import math
 import pandas as pd
 import re
-import sys
 from pathlib import Path
 from dataclasses import dataclass, field
 from openpyxl import Workbook
@@ -53,6 +57,7 @@ SHIPMENT_INFO_FLOW2 = [
 SHIPMENT_INFO_FLOW3 = [
     "Lane Id", "Origin City", "Origin postal code", "Origin country code",
     "Destination city", "Destination postal code", "destination country code",
+    "Carrier Name",
 ]
 
 EQUIP_RENAME = {
@@ -361,6 +366,21 @@ def get_shipment_cols(df: pd.DataFrame, labels: list[str] | None = None) -> list
         if actual:
             result.append(actual)
     return result
+
+
+def assign_flow3_carrier_name(df: pd.DataFrame) -> pd.DataFrame:
+    """Set Carrier Name in Flow 3 based on destination country code."""
+    dest_col = find_col(list(df.columns), "destination country code")
+    if not dest_col:
+        return df
+
+    df = df.copy()
+    codes = df[dest_col].astype(str).str.strip().str.upper()
+    carrier = pd.Series("", index=df.index, dtype=str)
+    carrier[codes == "MA"] = "Maersk Logistics MA"
+    carrier[codes.isin(["DE", "CZ"])] = "Damco CZ, Damco DE"
+    df["Carrier Name"] = carrier
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -810,8 +830,8 @@ def flow_multiplier(df_processed: pd.DataFrame, df_original: pd.DataFrame, file_
     equip_types = sorted(
         df_processed[equip_col].dropna().unique(), key=str
     )
-    
 
+    df_processed = assign_flow3_carrier_name(df_processed)
     shipment_cols = get_shipment_cols(df_processed, SHIPMENT_INFO_FLOW3)
     currency_col = find_col(list(df_processed.columns), "Currency")
 
