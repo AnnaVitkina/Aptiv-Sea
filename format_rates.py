@@ -37,6 +37,7 @@ from xlsx_to_df import main as load_excel
 from process_df import process
 from excel_layout import format_rates_workbook
 from config import OUTPUT_DIR
+from accessorial_costs import maybe_add_accessorial_costs
 
 
 SHIPMENT_INFO_LABELS = [
@@ -603,6 +604,7 @@ def flow_lcl(df_processed: pd.DataFrame, df_original: pd.DataFrame, file_path: P
     out = OUTPUT_DIR / f"{file_path.stem}_rates.xlsx"
     wb.save(out)
     print(f"  Saved → {out}")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -713,6 +715,7 @@ def flow_qty_pct(df_processed: pd.DataFrame, df_original: pd.DataFrame, file_pat
     out = OUTPUT_DIR / f"{file_path.stem}_fcl.xlsx"
     wb.save(out)
     print(f"  Saved → {out}")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -822,7 +825,7 @@ def flow_multiplier(df_processed: pd.DataFrame, df_original: pd.DataFrame, file_
     equip_col = find_col(list(df_processed.columns), "Equipment type")
     if not equip_col:
         print("  Error: Equipment Type column not found")
-        return
+        return None
 
     # Rename equipment type values in the data
     df_processed[equip_col] = df_processed[equip_col].astype(str).str.strip().replace(EQUIP_RENAME)
@@ -882,6 +885,7 @@ def flow_multiplier(df_processed: pd.DataFrame, df_original: pd.DataFrame, file_
     out = OUTPUT_DIR / f"{file_path.stem}_multiplier.xlsx"
     wb.save(out)
     print(f"  Saved → {out}")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -930,12 +934,15 @@ if __name__ == "__main__":
     else:
         flow_choice = input("\nCould not detect flow automatically. Enter choice (1/2/3): ").strip()
 
+    output_path = None
     if flow_choice == "1":
-        flow_lcl(df_processed, df_original, file_path)
+        output_path = flow_lcl(df_processed, df_original, file_path)
     elif flow_choice == "2":
-        flow_qty_pct(df_processed, df_original, file_path)
+        output_path = flow_qty_pct(df_processed, df_original, file_path)
     elif flow_choice == "3":
-        flow_multiplier(df_processed, df_original, file_path)
+        output_path = flow_multiplier(df_processed, df_original, file_path)
     else:
         print(f"Invalid choice: {flow_choice}")
         sys.exit(1)
+
+    maybe_add_accessorial_costs(xlsx, output_path, flow_choice)
