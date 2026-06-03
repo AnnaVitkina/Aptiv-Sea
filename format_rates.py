@@ -369,6 +369,33 @@ def get_shipment_cols(df: pd.DataFrame, labels: list[str] | None = None) -> list
     return result
 
 
+LCL_CARRIER_COUNTRIES = frozenset({"DE", "HU", "IT", "PL", "PT", "RS"})
+
+
+def assign_flow1_carrier_name(df: pd.DataFrame) -> pd.DataFrame:
+    """Set Carrier Name for LCL (DHL) flow from destination country code."""
+    dest_col = find_col(list(df.columns), "destination country code")
+    if not dest_col:
+        return df
+
+    df = df.copy()
+    codes = df[dest_col].astype(str).str.strip().str.upper()
+    carrier = pd.Series("", index=df.index, dtype=str)
+
+    for idx, code in codes.items():
+        if not code or code == "NAN":
+            continue
+        if code == "MA":
+            carrier.at[idx] = "DHL Logistic MA"
+        elif code == "MK":
+            carrier.at[idx] = "DHL Global Forwarding RS"
+        elif code in LCL_CARRIER_COUNTRIES:
+            carrier.at[idx] = f"DHL Global Forwarding {code}"
+
+    df["Carrier Name"] = carrier
+    return df
+
+
 def assign_flow3_carrier_name(df: pd.DataFrame) -> pd.DataFrame:
     """Set Carrier Name in Flow 3 based on destination country code."""
     dest_col = find_col(list(df.columns), "destination country code")
@@ -552,6 +579,7 @@ def flow_lcl(df_processed: pd.DataFrame, df_original: pd.DataFrame, file_path: P
     else:
         pass
 
+    df_processed = assign_flow1_carrier_name(df_processed)
     all_cols = list(df_processed.columns)
     shipment_cols = get_shipment_cols(df_processed)
 
