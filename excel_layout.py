@@ -47,6 +47,7 @@ RATE_SUBCOLUMN_WIDTHS = {
 
 GREEN_FILL = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
 RED_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+BRIGHT_RED_FILL = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
 HEADER_FILL = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
 BLOCK_FILL = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
 
@@ -66,11 +67,14 @@ def format_rates_workbook(
     data_row_count: int,
     standard_display_names: set[str] | None = None,
     unawarded_row_indices: set[int] | None = None,
+    highlight_cells: list[tuple[int, int]] | None = None,
 ) -> None:
     if standard_display_names is None:
         standard_display_names = set()
     if unawarded_row_indices is None:
         unawarded_row_indices = set()
+    if highlight_cells is None:
+        highlight_cells = []
     shipment_width = len(shipment_columns)
     _apply_header_styles(ws, shipment_columns, shipment_width, cost_spans)
     _apply_data_fonts(ws, shipment_width, data_start_row, data_row_count)
@@ -80,8 +84,19 @@ def format_rates_workbook(
     _apply_unawarded_lane_highlights(
         ws, data_start_row, data_row_count, unawarded_row_indices
     )
+    _apply_cell_highlights(ws, data_start_row, highlight_cells)
     _apply_column_widths(ws, shipment_columns, cost_spans)
     _apply_row_heights(ws, data_start_row, data_row_count)
+
+
+def _apply_cell_highlights(
+    ws,
+    data_start_row: int,
+    highlight_cells: list[tuple[int, int]],
+) -> None:
+    """Bright red fill on specific data cells (row offset, 1-based column index)."""
+    for row_offset, col_idx in highlight_cells:
+        ws.cell(row=data_start_row + row_offset, column=col_idx).fill = BRIGHT_RED_FILL
 
 
 def _apply_unawarded_lane_highlights(
