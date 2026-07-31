@@ -49,17 +49,17 @@ def build_column_map(df: pd.DataFrame) -> dict[str, str]:
 
 
 def get_effective_date(xlsx: pd.ExcelFile) -> str:
-    """Read the Revision tab, find the last Effective date, return as DD.MM.YYYY.
+    """Read the Revision/Revisions tab, find the last Effective date, return as DD.MM.YYYY.
 
     Scans all rows/columns for the header because it may not be on the first row.
     """
     revision_tab = None
     for name in xlsx.sheet_names:
-        if name.strip().lower() == "revision":
+        if name.strip().lower() in {"revision", "revisions"}:
             revision_tab = name
             break
     if revision_tab is None:
-        print("Error: 'Revision' tab not found in the workbook")
+        print("Error: 'Revision'/'Revisions' tab not found in the workbook")
         sys.exit(1)
 
     raw = pd.read_excel(xlsx, sheet_name=revision_tab, header=None)
@@ -181,7 +181,7 @@ def save_output(df: pd.DataFrame, original_name: str):
 
 
 if __name__ == "__main__":
-    df, xlsx, file_path = load_excel()
+    df, xlsx, file_path, _sheet = load_excel()
 
     result = process(df, xlsx)
 
