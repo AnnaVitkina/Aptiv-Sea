@@ -624,7 +624,8 @@ def build_excel(df: pd.DataFrame, shipment_cols: list[str],
                 costs: list[CostDef], currency_col: str | None,
                 show_blocks: bool = True,
                 standard_names: set[str] | None = None,
-                awarded_lane_ids: set[str] | None = None) -> Workbook:
+                awarded_lane_ids: set[str] | None = None,
+                highlight_cells: list[tuple[int, int]] | None = None) -> Workbook:
     wb = Workbook()
     ws = wb.active
     ws.title = "Rates"
@@ -775,6 +776,7 @@ def build_excel(df: pd.DataFrame, shipment_cols: list[str],
         data_start_row, data_row_count,
         standard_names,
         unawarded_row_indices,
+        highlight_cells,
     )
 
     return wb
@@ -1046,6 +1048,13 @@ FLOW3_BASE_COSTS = [
     ("ETS", "FCL ETSCharge"),
 ]
 
+FLOW3_DISPLAY_NAMES = {
+    "Origin handling fee": "Pre-carriage Handling Charge",
+    "BAF": "FCL BAF Charge",
+}
+
+FLOW3_COUNTRY_CODE_HIGHLIGHT_LANES = frozenset({"EMEA0369", "EMEA0325"})
+
 
 def merge_by_lane(df: pd.DataFrame, shipment_cols: list[str],
                    equip_col: str, equip_types: list[str],
@@ -1100,19 +1109,20 @@ def build_flow3_costs(equip_types: list[str],
     """Create CostDefs pointing to the pre-built merged columns (no row_filter)."""
     costs: list[CostDef] = []
     for name, _src_col in cost_specs:
+        display_name = FLOW3_DISPLAY_NAMES.get(name, name)
         for et in equip_types:
             col_key = f"{name}__{et}"
 
             if name == "Transport cost":
                 base_applies = ""
             else:
-                base_applies = f"Apply if: MEASUREMENT contains 'ACC/{name}' in any item"
+                base_applies = "Applies if invoiced by Carrier"
 
             multiplier = f"Multiplier:\nType/Container_{et}"
             applies = f"{base_applies}\n{multiplier}" if base_applies else multiplier
 
             costs.append(CostDef(
-                display_name=f"{name}({et})",
+                display_name=f"{display_name}({et})",
                 block="Other charges",
                 flat_col=col_key,
                 applies_if=applies,
@@ -1184,9 +1194,28 @@ def flow_multiplier(df_processed: pd.DataFrame, df_original: pd.DataFrame, file_
 
     print(f"  Building Excel — {len(shipment_cols)} shipment cols, {len(resolved)} costs")
 
-    std_names = {f"{name}({et})" for name, _ in FLOW3_BASE_COSTS for et in equip_types}
+    std_names = {
+        f"{FLOW3_DISPLAY_NAMES.get(name, name)}({et})"
+        for name, _ in FLOW3_BASE_COSTS
+        for et in equip_types
+    }
+
+    highlight_cells: list[tuple[int, int]] = []
+    lane_col = find_col(shipment_cols, "Lane Id")
+    origin_cc_col = find_col(shipment_cols, "Origin country code")
+    dest_cc_col = find_col(shipment_cols, "destination country code")
+    if lane_col:
+        for row_idx in range(len(df_merged)):
+            lane = str(df_merged.iloc[row_idx][lane_col]).strip()
+            if lane in FLOW3_COUNTRY_CODE_HIGHLIGHT_LANES:
+                if origin_cc_col:
+                    highlight_cells.append((row_idx, shipment_cols.index(origin_cc_col) + 1))
+                if dest_cc_col:
+                    highlight_cells.append((row_idx, shipment_cols.index(dest_cc_col) + 1))
+
     wb = build_excel(df_merged, shipment_cols, resolved, currency_col,
-                     show_blocks=False, standard_names=std_names)
+                     show_blocks=False, standard_names=std_names,
+                     highlight_cells=highlight_cells)
 
     OUTPUT_DIR.mkdir(exist_ok=True)
     out = OUTPUT_DIR / f"{file_path.stem}_multiplier.xlsx"
