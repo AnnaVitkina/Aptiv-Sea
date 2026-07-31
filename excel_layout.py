@@ -46,6 +46,7 @@ RATE_SUBCOLUMN_WIDTHS = {
 }
 
 GREEN_FILL = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+RED_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 HEADER_FILL = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
 BLOCK_FILL = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
 
@@ -64,17 +65,42 @@ def format_rates_workbook(
     data_start_row: int,
     data_row_count: int,
     standard_display_names: set[str] | None = None,
+    unawarded_row_indices: set[int] | None = None,
 ) -> None:
     if standard_display_names is None:
         standard_display_names = set()
+    if unawarded_row_indices is None:
+        unawarded_row_indices = set()
     shipment_width = len(shipment_columns)
     _apply_header_styles(ws, shipment_columns, shipment_width, cost_spans)
     _apply_data_fonts(ws, shipment_width, data_start_row, data_row_count)
     _apply_rate_highlights(
         ws, cost_spans, data_start_row, data_row_count, standard_display_names
     )
+    _apply_unawarded_lane_highlights(
+        ws, data_start_row, data_row_count, unawarded_row_indices
+    )
     _apply_column_widths(ws, shipment_columns, cost_spans)
     _apply_row_heights(ws, data_start_row, data_row_count)
+
+
+def _apply_unawarded_lane_highlights(
+    ws,
+    data_start_row: int,
+    data_row_count: int,
+    unawarded_row_indices: set[int],
+) -> None:
+    """Red fill on data rows whose Lane ID is not on the awarded-lanes tab."""
+    if not unawarded_row_indices:
+        return
+    last_row = data_start_row + max(data_row_count - 1, 0)
+    max_col = ws.max_column
+    for row_offset in unawarded_row_indices:
+        row_idx = data_start_row + row_offset
+        if row_idx > last_row:
+            continue
+        for col_idx in range(1, max_col + 1):
+            ws.cell(row=row_idx, column=col_idx).fill = RED_FILL
 
 
 def _apply_rate_highlights(
