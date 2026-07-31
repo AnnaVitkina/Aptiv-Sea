@@ -113,6 +113,211 @@ def round_up(value, decimals=3):
         return value
 
 
+def is_false_like(value) -> bool:
+    if pd.isna(value):
+        return False
+    if isinstance(value, bool):
+        return value is False
+    if isinstance(value, (int, float)):
+        return float(value) == 0.0
+    s = str(value).strip().lower()
+    return s in {"false", "no", "n", "0"}
+
+
+def is_true_like(value) -> bool:
+    if pd.isna(value):
+        return False
+    if isinstance(value, bool):
+        return value is True
+    if isinstance(value, (int, float)):
+        return float(value) != 0.0
+    s = str(value).strip().lower()
+    return s in {"true", "yes", "y", "1"}
+
+
+def format_revision_date(value) -> str | None:
+    if pd.isna(value):
+        return None
+    dt = pd.to_datetime(value, errors="coerce", dayfirst=True)
+    if pd.isna(dt):
+        return None
+    return dt.strftime("%d.%m.%Y")
+
+
+def read_revision_validity(xlsx: pd.ExcelFile) -> tuple[str | None, str | None]:
+    revision_tab = next(
+        (s for s in xlsx.sheet_names if s.strip().lower() in {"revision", "revisions"}),
+        None,
+    )
+    if not revision_tab:
+        return None, None
+
+    raw = pd.read_excel(xlsx, sheet_name=revision_tab, header=None)
+    valid_from = None
+    valid_to = None
+
+    for r in range(len(raw)):
+        for c in range(len(raw.columns)):
+            cell = raw.iloc[r, c]
+            text = str(cell).strip().lower()
+            if text in {"", "nan"}:
+                continue
+
+            def pick_value() -> object:
+                for nc in range(c + 1, len(raw.columns)):
+                    v = raw.iloc[r, nc]
+                    if not pd.isna(v) and str(v).strip() != "":
+                        return v
+                if ":" in str(cell):
+                    return str(cell).split(":", 1)[1].strip()
+                return None
+
+            if valid_from is None and "valid from" in text:
+                valid_from = format_revision_date(pick_value())
+            if valid_to is None and ("until" in text or "valid to" in text):
+                valid_to = format_revision_date(pick_value())
+
+            if valid_from and valid_to:
+                return valid_from, valid_to
+
+    return valid_from, valid_to
+
+
+def find_workbook_sheet(xlsx: pd.ExcelFile, *name_parts: str) -> str | None:
+    """Find a sheet by exact name or by containing all name parts."""
+    targets = {part.strip().lower() for part in name_parts}
+    for sheet in xlsx.sheet_names:
+        sheet_norm = sheet.strip().lower()
+        if sheet_norm in targets:
+            return sheet
+    for sheet in xlsx.sheet_names:
+        sheet_norm = sheet.strip().lower()
+        if all(part in sheet_norm for part in targets):
+            return sheet
+    return None
+
+
+def read_awarded_lane_ids(xlsx: pd.ExcelFile) -> set[str] | None:
+    """Read Lane IDs from 'Awarded lanes to be implemented' when present."""
+    sheet = find_workbook_sheet(xlsx, "awarded lanes to be implemented")
+    if not sheet:
+        return None
+
+    df = pd.read_excel(xlsx, sheet_name=sheet)
+    lane_col = (
+        find_col(list(df.columns), "Lane Id")
+        or find_col(list(df.columns), "Lane ID")
+    )
+    if not lane_col:
+        print("  Warning: 'Awarded lanes to be implemented' tab found but Lane ID column is missing")
+        return set()
+
+    return {
+        str(v).strip()
+        for v in df[lane_col].dropna()
+        if str(v).strip() and str(v).strip().lower() != "nan"
+    }
+
+
+def _row_lookup_key(row: pd.Series, key_columns: list[str]) -> tuple[str, ...]:
+    return tuple(
+        str(row[col]).strip() if col in row.index and pd.notna(row[col]) else ""
+        for col in key_columns
+    )
+
+
+def read_source_column_values(
+    file_path: Path,
+    sheet_name: str,
+    column_name: str,
+    key_columns: list[str],
+) -> dict[tuple[str, ...], object]:
+    """Read exact workbook values for one column, keyed by shipment columns."""
+    from openpyxl import load_workbook
+
+    wb_formula = load_workbook(file_path, data_only=False, read_only=True)
+    wb_values = load_workbook(file_path, data_only=True, read_only=True)
+    try:
+        ws_formula = wb_formula[sheet_name]
+        ws_values = wb_values[sheet_name]
+
+        header_row = next(ws_formula.iter_rows(min_row=1, max_row=1, values_only=True))
+        col_map: dict[str, int] = {}
+        for idx, name in enumerate(header_row):
+            if name is None:
+                continue
+            col_map[normalize(str(name))] = idx
+
+        value_idx = col_map.get(normalize(column_name))
+        if value_idx is None:
+            return {}
+
+        key_idxs: list[int] = []
+        for key_col in key_columns:
+            idx = col_map.get(normalize(key_col))
+            if idx is None:
+                return {}
+            key_idxs.append(idx)
+
+        result: dict[tuple[str, ...], object] = {}
+        rows_formula = ws_formula.iter_rows(min_row=2, values_only=False)
+        rows_values = ws_values.iter_rows(min_row=2, values_only=True)
+        for row_formula, row_values in zip(rows_formula, rows_values):
+            key = tuple(
+                str(row_formula[i].value).strip()
+                if row_formula[i].value is not None else ""
+                for i in key_idxs
+            )
+            if not any(key):
+                continue
+
+            cell = row_formula[value_idx]
+            if cell.data_type == "f":
+                val = row_values[value_idx]
+            else:
+                val = cell.value
+            result[key] = val
+        return result
+    finally:
+        wb_formula.close()
+        wb_values.close()
+
+
+def apply_exact_origin_handling_fee(
+    df: pd.DataFrame,
+    file_path: Path,
+    sheet_name: str,
+    key_labels: list[str] | None = None,
+) -> pd.DataFrame:
+    """Overwrite Origin handling fee min values with exact source workbook values."""
+    column_name = "Pre-carriage Handling Charge min"
+    dst_col = find_col(list(df.columns), column_name)
+    if not dst_col:
+        return df
+
+    key_columns: list[str] = []
+    for label in (key_labels or SHIPMENT_INFO_FLOW2):
+        actual = find_col(list(df.columns), label)
+        if actual:
+            key_columns.append(actual)
+    if not key_columns:
+        return df
+
+    source_values = read_source_column_values(
+        file_path, sheet_name, column_name, key_columns
+    )
+    if not source_values:
+        return df
+
+    df = df.copy()
+    new_values = []
+    for _, row in df.iterrows():
+        key = _row_lookup_key(row, key_columns)
+        new_values.append(source_values.get(key, row[dst_col]))
+    df[dst_col] = new_values
+    return df
+
+
 # ---------------------------------------------------------------------------
 # Cost definition
 # ---------------------------------------------------------------------------
@@ -418,7 +623,8 @@ def assign_flow3_carrier_name(df: pd.DataFrame) -> pd.DataFrame:
 def build_excel(df: pd.DataFrame, shipment_cols: list[str],
                 costs: list[CostDef], currency_col: str | None,
                 show_blocks: bool = True,
-                standard_names: set[str] | None = None) -> Workbook:
+                standard_names: set[str] | None = None,
+                awarded_lane_ids: set[str] | None = None) -> Workbook:
     wb = Workbook()
     ws = wb.active
     ws.title = "Rates"
@@ -522,12 +728,18 @@ def build_excel(df: pd.DataFrame, shipment_cols: list[str],
             if cost.has_flat:
                 src = cost._min_actual if cost.has_min else cost._flat_actual
                 if src and src in df.columns:
-                    ws.cell(row=data_row, column=c, value=round_up(df.iloc[row_idx][src]))
+                    val = df.iloc[row_idx][src]
+                    if normalize(cost.display_name) != "origin handling fee":
+                        val = round_up(val)
+                    ws.cell(row=data_row, column=c, value=val)
                 c += 1
 
             # p/unit
             if cost.has_punit and cost._unit_actual and cost._unit_actual in df.columns:
-                ws.cell(row=data_row, column=c, value=round_up(df.iloc[row_idx][cost._unit_actual]))
+                val = df.iloc[row_idx][cost._unit_actual]
+                if normalize(cost.display_name) != "origin handling fee":
+                    val = round_up(val)
+                ws.cell(row=data_row, column=c, value=val)
 
     # --- Build cost_spans for formatting ---
     cost_spans = []
@@ -546,10 +758,23 @@ def build_excel(df: pd.DataFrame, shipment_cols: list[str],
 
     data_start_row = HEADER_ROWS + 1
     data_row_count = len(df)
+    unawarded_row_indices: set[int] = set()
+    if awarded_lane_ids is not None:
+        lane_col = next(
+            (c for c in shipment_cols if normalize(c) == "lane id"),
+            None,
+        )
+        if lane_col:
+            for row_idx in range(len(df)):
+                lane = str(df.iloc[row_idx][lane_col]).strip()
+                if lane and lane.lower() != "nan" and lane not in awarded_lane_ids:
+                    unawarded_row_indices.add(row_idx)
+
     format_rates_workbook(
         ws, shipment_cols, cost_spans,
         data_start_row, data_row_count,
         standard_names,
+        unawarded_row_indices,
     )
 
     return wb
@@ -670,7 +895,9 @@ def get_flow2_costs() -> list[CostDef]:
     return costs
 
 
-def flow_qty_pct(df_processed: pd.DataFrame, df_original: pd.DataFrame, file_path: Path):
+def flow_qty_pct(df_processed: pd.DataFrame, df_original: pd.DataFrame,
+                 xlsx: pd.ExcelFile, file_path: Path, source_sheet: str):
+    df_original = df_original.copy()
     # Add Currency from original before any row filtering
     if not find_col(list(df_processed.columns), "Currency"):
         currency_src = find_col(list(df_original.columns), "Currency")
@@ -678,17 +905,45 @@ def flow_qty_pct(df_processed: pd.DataFrame, df_original: pd.DataFrame, file_pat
             df_processed = df_processed.copy()
             df_processed["Currency"] = df_original[currency_src].values
 
+    # Optionally keep only Lane ID groups where at least one row has Existing Lane? = TRUE
+    existing_lane_col = find_col(list(df_original.columns), "Existing Lane?")
+    lane_id_col = find_col(list(df_original.columns), "Lane Id")
+    remove_non_existing = input(
+        "\nRemove rows where no row in the same Lane ID has 'Existing Lane?' = TRUE? (y/n): "
+    ).strip().lower() in ("y", "yes")
+    if remove_non_existing and existing_lane_col and existing_lane_col in df_original.columns and lane_id_col:
+        before = len(df_processed)
+        existing_true = df_original[existing_lane_col].map(is_true_like).fillna(False)
+        lane_vals = df_original[lane_id_col]
+        lane_has_id = lane_vals.notna() & lane_vals.astype(str).str.strip().ne("")
+        lane_keep = existing_true.groupby(lane_vals).transform("any")
+        keep_mask = pd.Series(True, index=df_original.index)
+        keep_mask[lane_has_id] = lane_keep[lane_has_id]
+        keep_mask[~lane_has_id] = existing_true[~lane_has_id]
+        keep_mask = keep_mask.reindex(df_processed.index, fill_value=True)
+        df_processed = df_processed.loc[keep_mask].reset_index(drop=True)
+        df_original = df_original.loc[keep_mask].reset_index(drop=True)
+        removed = before - len(df_processed)
+        if removed:
+            print(f"  Removed {removed} rows where no row in the same Lane ID has 'Existing Lane?' = TRUE")
+
     remove_lcl = input("\nRemove LCL shipments? (y/n): ").strip().lower()
     if remove_lcl in ("y", "yes"):
         equip_col = find_col(list(df_processed.columns), "Equipment type")
         if equip_col:
             before = len(df_processed)
-            df_processed = df_processed[
-                ~df_processed[equip_col].astype(str).str.contains("LCL|LTL", case=False, na=False)
-            ].reset_index(drop=True)
+            lcl_mask = ~df_processed[equip_col].astype(str).str.contains(
+                "LCL|LTL", case=False, na=False
+            )
+            df_processed = df_processed.loc[lcl_mask].reset_index(drop=True)
+            df_original = df_original.loc[lcl_mask].reset_index(drop=True)
             print(f"  Removed {before - len(df_processed)} LCL rows ({len(df_processed)} remaining)")
         else:
             pass
+
+    df_processed = apply_exact_origin_handling_fee(
+        df_processed, file_path, source_sheet, SHIPMENT_INFO_FLOW2
+    )
 
     # Rename equipment type values
     equip_col_f2 = find_col(list(df_processed.columns), "Equipment type")
@@ -696,7 +951,27 @@ def flow_qty_pct(df_processed: pd.DataFrame, df_original: pd.DataFrame, file_pat
         df_processed[equip_col_f2] = df_processed[equip_col_f2].astype(str).str.strip().replace(EQUIP_RENAME_FLOW2)
 
     all_cols = list(df_processed.columns)
-    shipment_cols = get_shipment_cols(df_processed, SHIPMENT_INFO_FLOW2)
+    add_validity = input(
+        "\nAdd shipment columns 'Valid from' and 'Valid to' from Revision tab? (y/n): "
+    ).strip().lower() in ("y", "yes")
+    shipment_labels = list(SHIPMENT_INFO_FLOW2)
+    if add_validity:
+        valid_from, valid_to = read_revision_validity(xlsx)
+        if valid_from and valid_to:
+            df_processed["Valid from"] = valid_from
+            df_processed["Valid to"] = valid_to
+            shipment_labels.extend(["Valid from", "Valid to"])
+            print(f"  Added validity period from Revision tab: {valid_from} - {valid_to}")
+        else:
+            print("  Warning: Could not read both 'Valid from' and 'until' from Revision tab; columns not added")
+    shipment_cols = get_shipment_cols(df_processed, shipment_labels)
+
+    awarded_lane_ids = read_awarded_lane_ids(xlsx)
+    if awarded_lane_ids is not None:
+        print(
+            f"  Awarded lanes tab found — {len(awarded_lane_ids)} lane IDs; "
+            "rows with other Lane IDs will be highlighted in red"
+        )
 
     costs = get_flow2_costs()
     resolved: list[CostDef] = []
@@ -723,6 +998,9 @@ def flow_qty_pct(df_processed: pd.DataFrame, df_original: pd.DataFrame, file_pat
     used: set[str] = set()
     for c in resolved:
         used.update(c.used_columns())
+    per_kg_handling = find_col(all_cols, "Pre-carriage Handling Charge per KG")
+    if per_kg_handling:
+        used.add(per_kg_handling)
 
     for uc in find_unmatched_costs(df_processed, used, shipment_cols):
         uc.applies_if = f"Apply if: MEASUREMENT contains 'ACC/{uc.display_name}' in any item"
@@ -737,7 +1015,8 @@ def flow_qty_pct(df_processed: pd.DataFrame, df_original: pd.DataFrame, file_pat
 
     std_names = {c.display_name for c in get_flow2_costs()}
     wb = build_excel(df_processed, shipment_cols, resolved, currency_col,
-                     show_blocks=False, standard_names=std_names)
+                     show_blocks=False, standard_names=std_names,
+                     awarded_lane_ids=awarded_lane_ids)
 
     OUTPUT_DIR.mkdir(exist_ok=True)
     out = OUTPUT_DIR / f"{file_path.stem}_fcl.xlsx"
@@ -942,7 +1221,7 @@ def detect_flow(file_path: Path) -> str | None:
 
 
 if __name__ == "__main__":
-    df_original, xlsx, file_path = load_excel()
+    df_original, xlsx, file_path, source_sheet = load_excel()
     df_processed = process(df_original, xlsx)
     print(f"  Ready — {len(df_processed)} rows x {len(df_processed.columns)} cols")
 
@@ -966,7 +1245,7 @@ if __name__ == "__main__":
     if flow_choice == "1":
         output_path = flow_lcl(df_processed, df_original, file_path)
     elif flow_choice == "2":
-        output_path = flow_qty_pct(df_processed, df_original, file_path)
+        output_path = flow_qty_pct(df_processed, df_original, xlsx, file_path, source_sheet)
     elif flow_choice == "3":
         output_path = flow_multiplier(df_processed, df_original, file_path)
     else:
