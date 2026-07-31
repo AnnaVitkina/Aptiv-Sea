@@ -61,7 +61,7 @@ def main():
     df = clean_df(df)
     print(f"  After cleaning — {len(df)} rows")
 
-    return df, xlsx, path
+    return df, xlsx, path, sheet
 
 
 def clean_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -82,4 +82,4 @@ def clean_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    df, xlsx, _ = main()
+    df, xlsx, _, _ = main()
