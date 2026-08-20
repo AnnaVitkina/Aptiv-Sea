@@ -49,6 +49,14 @@ SHIPMENT_INFO_LABELS = [
     "Valid from", "Valid to", "Equipment type",
 ]
 
+SHIPMENT_INFO_FLOW1 = [
+    "Lane Id", "Origin City", "Origin postal code", "Origin country code",
+    "Origin Country", "Origin region", "Destination city",
+    "Destination postal code", "destination country code",
+    "Destination country", "Destination region", "Payer region",
+    "Origin port", "Destination port", "Service", "Carrier Name",
+]
+
 SHIPMENT_INFO_FLOW2 = [
     "Lane Id", "Origin City", "Origin postal code", "Origin country code",
     "Destination city", "Destination postal code", "destination country code",
@@ -111,6 +119,34 @@ def round_up(value, decimals=3):
         return math.ceil(float(value) * multiplier) / multiplier
     except (ValueError, TypeError):
         return value
+
+
+def numeric_rate_value(value, *, skip_round: bool = False):
+    """Return a numeric rate value, or None when the source is not numeric."""
+    if pd.isna(value):
+        return None
+    try:
+        num = float(value)
+    except (ValueError, TypeError):
+        if isinstance(value, str):
+            try:
+                num = float(value.replace(",", "").strip())
+            except ValueError:
+                return None
+        else:
+            return None
+    return num if skip_round else round_up(num)
+
+
+def clean_postal_code(value):
+    """Keep digits only in postal codes (e.g. 293-01' -> 29301)."""
+    if pd.isna(value):
+        return value
+    s = str(value).strip()
+    if not s or s.lower() == "nan":
+        return value
+    digits = re.sub(r"\D", "", s)
+    return digits if digits else ""
 
 
 def is_false_like(value) -> bool:
@@ -197,13 +233,20 @@ def find_workbook_sheet(xlsx: pd.ExcelFile, *name_parts: str) -> str | None:
     return None
 
 
-def read_awarded_lane_ids(xlsx: pd.ExcelFile) -> set[str] | None:
-    """Read Lane IDs from 'Awarded lanes to be implemented' when present."""
+def read_awarded_lanes_sheet(xlsx: pd.ExcelFile) -> pd.DataFrame | None:
+    """Load 'Awarded lanes to be implemented' when present."""
     sheet = find_workbook_sheet(xlsx, "awarded lanes to be implemented")
     if not sheet:
         return None
+    return pd.read_excel(xlsx, sheet_name=sheet)
 
-    df = pd.read_excel(xlsx, sheet_name=sheet)
+
+def read_awarded_lane_ids(xlsx: pd.ExcelFile) -> set[str] | None:
+    """Read Lane IDs from 'Awarded lanes to be implemented' when present."""
+    df = read_awarded_lanes_sheet(xlsx)
+    if df is None:
+        return None
+
     lane_col = (
         find_col(list(df.columns), "Lane Id")
         or find_col(list(df.columns), "Lane ID")
@@ -217,6 +260,73 @@ def read_awarded_lane_ids(xlsx: pd.ExcelFile) -> set[str] | None:
         for v in df[lane_col].dropna()
         if str(v).strip() and str(v).strip().lower() != "nan"
     }
+
+
+def read_awarded_lane_move_types(xlsx: pd.ExcelFile) -> dict[str, str] | None:
+    """Read Lane ID -> Move Type from 'Awarded lanes to be implemented'."""
+    df = read_awarded_lanes_sheet(xlsx)
+    if df is None:
+        return None
+
+    lane_col = (
+        find_col(list(df.columns), "Lane Id")
+        or find_col(list(df.columns), "Lane ID")
+    )
+    move_col = find_col(list(df.columns), "Move Type")
+    if not lane_col or not move_col:
+        print(
+            "  Warning: 'Awarded lanes to be implemented' tab found but "
+            "Lane ID or Move Type column is missing"
+        )
+        return {}
+
+    result: dict[str, str] = {}
+    for _, row in df.iterrows():
+        lane = str(row[lane_col]).strip()
+        if not lane or lane.lower() == "nan":
+            continue
+        move_type = str(row[move_col]).strip()
+        if not move_type or move_type.lower() == "nan":
+            continue
+        if move_type.upper() == "D2D":
+            move_type = "DTD"
+        result[lane] = move_type
+    return result
+
+
+def apply_service_from_move_type(
+    df: pd.DataFrame, move_types: dict[str, str] | None
+) -> pd.DataFrame:
+    """Set Service from awarded-lane Move Type values, keyed by Lane Id."""
+    if not move_types:
+        return df
+
+    lane_col = find_col(list(df.columns), "Lane Id")
+    if not lane_col:
+        return df
+
+    df = df.copy()
+    service_col = find_col(list(df.columns), "Service") or "Service"
+    if service_col not in df.columns:
+        df[service_col] = ""
+
+    for idx, row in df.iterrows():
+        lane = str(row[lane_col]).strip()
+        if lane in move_types:
+            df.at[idx, service_col] = move_types[lane]
+    return df
+
+
+def fill_empty_regions_na(df: pd.DataFrame) -> pd.DataFrame:
+    """Replace empty Origin/Destination region values with 'NA'."""
+    df = df.copy()
+    for label in ("Origin region", "Destination region"):
+        col = find_col(list(df.columns), label)
+        if not col:
+            continue
+        empty = df[col].isna() | df[col].astype(str).str.strip().isin(("", "nan"))
+        df.loc[empty, col] = "NA"
+    return df
 
 
 def _row_lookup_key(row: pd.Series, key_columns: list[str]) -> tuple[str, ...]:
@@ -704,7 +814,10 @@ def build_excel(df: pd.DataFrame, shipment_cols: list[str],
         data_row = HEADER_ROWS + 1 + row_idx
 
         for col_idx, col_name in enumerate(shipment_cols, start=1):
-            ws.cell(row=data_row, column=col_idx, value=df.iloc[row_idx][col_name])
+            val = df.iloc[row_idx][col_name]
+            if normalize(col_name) in {"origin postal code", "destination postal code"}:
+                val = clean_postal_code(val)
+            ws.cell(row=data_row, column=col_idx, value=val)
 
         for cost, s, _e in cost_ranges:
             # Row filter: only write data if this row matches (Storage / Equipment)
@@ -718,29 +831,38 @@ def build_excel(df: pd.DataFrame, shipment_cols: list[str],
                 if not match:
                     continue
 
+            flat_val = None
+            punit_val = None
+            skip_round = normalize(cost.display_name) == "origin handling fee"
+
+            if cost.has_flat:
+                src = cost._min_actual if cost.has_min else cost._flat_actual
+                if src and src in df.columns:
+                    flat_val = numeric_rate_value(
+                        df.iloc[row_idx][src], skip_round=skip_round
+                    )
+
+            if cost.has_punit and cost._unit_actual and cost._unit_actual in df.columns:
+                punit_val = numeric_rate_value(
+                    df.iloc[row_idx][cost._unit_actual], skip_round=skip_round
+                )
+
+            if flat_val is None and punit_val is None:
+                continue
+
             c = s
 
-            # Currency
+            # Currency — only when at least one rate value is present
             if currency_col and currency_col in df.columns:
                 ws.cell(row=data_row, column=c, value=df.iloc[row_idx][currency_col])
             c += 1
 
-            # Flat
             if cost.has_flat:
-                src = cost._min_actual if cost.has_min else cost._flat_actual
-                if src and src in df.columns:
-                    val = df.iloc[row_idx][src]
-                    if normalize(cost.display_name) != "origin handling fee":
-                        val = round_up(val)
-                    ws.cell(row=data_row, column=c, value=val)
+                ws.cell(row=data_row, column=c, value=flat_val)
                 c += 1
 
-            # p/unit
-            if cost.has_punit and cost._unit_actual and cost._unit_actual in df.columns:
-                val = df.iloc[row_idx][cost._unit_actual]
-                if normalize(cost.display_name) != "origin handling fee":
-                    val = round_up(val)
-                ws.cell(row=data_row, column=c, value=val)
+            if cost.has_punit:
+                ws.cell(row=data_row, column=c, value=punit_val)
 
     # --- Build cost_spans for formatting ---
     cost_spans = []
@@ -786,7 +908,12 @@ def build_excel(df: pd.DataFrame, shipment_cols: list[str],
 # Flow 1
 # ---------------------------------------------------------------------------
 
-def flow_lcl(df_processed: pd.DataFrame, df_original: pd.DataFrame, file_path: Path):
+def flow_lcl(
+    df_processed: pd.DataFrame,
+    df_original: pd.DataFrame,
+    file_path: Path,
+    xlsx: pd.ExcelFile,
+):
     # Add Currency from original before any row filtering
     if not find_col(list(df_processed.columns), "Currency"):
         currency_src = find_col(list(df_original.columns), "Currency")
@@ -807,8 +934,17 @@ def flow_lcl(df_processed: pd.DataFrame, df_original: pd.DataFrame, file_path: P
         pass
 
     df_processed = assign_flow1_carrier_name(df_processed)
+
+    move_types = read_awarded_lane_move_types(xlsx)
+    if move_types is not None:
+        df_processed = apply_service_from_move_type(df_processed, move_types)
+        if move_types:
+            print(f"  Service set from Move Type for {len(move_types)} awarded lanes")
+
+    df_processed = fill_empty_regions_na(df_processed)
+
     all_cols = list(df_processed.columns)
-    shipment_cols = get_shipment_cols(df_processed)
+    shipment_cols = get_shipment_cols(df_processed, SHIPMENT_INFO_FLOW1)
 
     # --- predefined costs ---
     costs = get_flow1_costs()
@@ -1272,7 +1408,7 @@ if __name__ == "__main__":
 
     output_path = None
     if flow_choice == "1":
-        output_path = flow_lcl(df_processed, df_original, file_path)
+        output_path = flow_lcl(df_processed, df_original, file_path, xlsx)
     elif flow_choice == "2":
         output_path = flow_qty_pct(df_processed, df_original, xlsx, file_path, source_sheet)
     elif flow_choice == "3":
