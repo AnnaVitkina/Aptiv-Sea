@@ -110,19 +110,55 @@ def find_col_contains(columns: list[str], *keywords: str) -> str | None:
     return None
 
 
-def round_up(value, decimals=3):
-    """Round a numeric value UP to the given decimal places."""
+def round_half_up(value, decimals: int):
+    """Round half away from zero (Excel display-style), to ``decimals`` places."""
+    multiplier = 10 ** decimals
+    if value >= 0:
+        return math.floor(float(value) * multiplier + 0.5) / multiplier
+    return math.ceil(float(value) * multiplier - 0.5) / multiplier
+
+
+def visible_numeric_value(value, number_format: str | None):
+    """Return the value Excel would show for a cell, based on its number format.
+
+    Example: stored 236.564 with format ``0.00`` → 236.56.
+    Non-numeric values and General/@ formats are returned unchanged.
+    """
+    if value is None or isinstance(value, bool):
+        return value
+    if not isinstance(value, (int, float)):
+        return value
     if pd.isna(value):
         return value
-    try:
-        multiplier = 10 ** decimals
-        return math.ceil(float(value) * multiplier) / multiplier
-    except (ValueError, TypeError):
+
+    fmt = (number_format or "General").split(";")[0].strip()
+    if not fmt or fmt.lower() in {"general", "@"}:
         return value
 
+    # Percentage formats display value*100 with the listed decimals
+    is_pct = "%" in fmt
+    # Strip locale/currency chrome so we can count decimal placeholders
+    fmt_core = re.sub(r'"[^"]*"', "", fmt)
+    fmt_core = re.sub(r"\[\$[^\]]*\]", "", fmt_core)
+    fmt_core = fmt_core.replace("%", "")
 
-def numeric_rate_value(value, *, skip_round: bool = False):
-    """Return a numeric rate value, or None when the source is not numeric."""
+    decimals_match = re.search(r"\.([0#]+)", fmt_core)
+    if decimals_match:
+        decimals = len(decimals_match.group(1))
+    elif re.search(r"[0#]", fmt_core):
+        decimals = 0
+    else:
+        return value
+
+    num = float(value) * 100.0 if is_pct else float(value)
+    return round_half_up(num, decimals)
+
+
+def numeric_rate_value(value):
+    """Return a numeric rate value, or None when the source is not numeric.
+
+    Excel-visible precision is applied earlier via ``apply_visible_rate_values``.
+    """
     if pd.isna(value):
         return None
     try:
@@ -135,7 +171,7 @@ def numeric_rate_value(value, *, skip_round: bool = False):
                 return None
         else:
             return None
-    return num if skip_round else round_up(num)
+    return num
 
 
 def clean_postal_code(value):
@@ -336,14 +372,32 @@ def _row_lookup_key(row: pd.Series, key_columns: list[str]) -> tuple[str, ...]:
     )
 
 
-def read_source_column_values(
+# Prefer these fields when matching source workbook rows to the processed frame.
+_VISIBLE_KEY_CANDIDATES = [
+    "Lane Id",
+    "Equipment type",
+    "Origin City",
+    "Origin postal code",
+    "Destination city",
+    "Destination postal code",
+]
+
+
+def read_visible_sheet_values(
     file_path: Path,
     sheet_name: str,
-    column_name: str,
     key_columns: list[str],
-) -> dict[tuple[str, ...], object]:
-    """Read exact workbook values for one column, keyed by shipment columns."""
+    value_columns: list[str],
+) -> dict[tuple[str, ...], dict[str, object]]:
+    """Read visible workbook values for many columns, keyed by shipment columns.
+
+    Uses each cell's number format so displayed precision is kept
+    (e.g. stored 236.564 with format 0.00 → 236.56), not full float precision.
+    """
     from openpyxl import load_workbook
+
+    if not key_columns or not value_columns:
+        return {}
 
     wb_formula = load_workbook(file_path, data_only=False, read_only=True)
     wb_values = load_workbook(file_path, data_only=True, read_only=True)
@@ -353,14 +407,12 @@ def read_source_column_values(
 
         header_row = next(ws_formula.iter_rows(min_row=1, max_row=1, values_only=True))
         col_map: dict[str, int] = {}
+        header_by_idx: dict[int, str] = {}
         for idx, name in enumerate(header_row):
             if name is None:
                 continue
             col_map[normalize(str(name))] = idx
-
-        value_idx = col_map.get(normalize(column_name))
-        if value_idx is None:
-            return {}
+            header_by_idx[idx] = str(name)
 
         key_idxs: list[int] = []
         for key_col in key_columns:
@@ -369,7 +421,15 @@ def read_source_column_values(
                 return {}
             key_idxs.append(idx)
 
-        result: dict[tuple[str, ...], object] = {}
+        value_idxs: list[tuple[str, int]] = []
+        for col_name in value_columns:
+            idx = col_map.get(normalize(col_name))
+            if idx is not None:
+                value_idxs.append((col_name, idx))
+        if not value_idxs:
+            return {}
+
+        result: dict[tuple[str, ...], dict[str, object]] = {}
         rows_formula = ws_formula.iter_rows(min_row=2, values_only=False)
         rows_values = ws_values.iter_rows(min_row=2, values_only=True)
         for row_formula, row_values in zip(rows_formula, rows_values):
@@ -381,51 +441,92 @@ def read_source_column_values(
             if not any(key):
                 continue
 
-            cell = row_formula[value_idx]
-            if cell.data_type == "f":
-                val = row_values[value_idx]
-            else:
-                val = cell.value
-            result[key] = val
+            row_vals: dict[str, object] = {}
+            for col_name, value_idx in value_idxs:
+                cell = row_formula[value_idx]
+                if cell.data_type == "f":
+                    val = row_values[value_idx]
+                else:
+                    val = cell.value
+                row_vals[col_name] = visible_numeric_value(val, cell.number_format)
+            result[key] = row_vals
         return result
     finally:
         wb_formula.close()
         wb_values.close()
 
 
-def apply_exact_origin_handling_fee(
+def apply_visible_rate_values(
     df: pd.DataFrame,
     file_path: Path,
     sheet_name: str,
     key_labels: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Overwrite Origin handling fee min values with exact source workbook values."""
-    column_name = "Pre-carriage Handling Charge min"
-    dst_col = find_col(list(df.columns), column_name)
-    if not dst_col:
-        return df
-
+    """Overwrite numeric rate columns with visible source workbook values."""
     key_columns: list[str] = []
-    for label in (key_labels or SHIPMENT_INFO_FLOW2):
+    for label in (key_labels or _VISIBLE_KEY_CANDIDATES):
         actual = find_col(list(df.columns), label)
-        if actual:
+        if actual and actual not in key_columns:
             key_columns.append(actual)
     if not key_columns:
         return df
 
-    source_values = read_source_column_values(
-        file_path, sheet_name, column_name, key_columns
+    # Rate columns are everything kept from the source that isn't a key column.
+    # Shipment text fields are left alone when non-numeric; numbers still get
+    # visible rounding (harmless for integer-like ids that have no decimals).
+    value_columns = [c for c in df.columns if c not in key_columns]
+    if not value_columns:
+        return df
+
+    source_rows = read_visible_sheet_values(
+        file_path, sheet_name, key_columns, value_columns
     )
-    if not source_values:
+    if not source_rows:
         return df
 
     df = df.copy()
-    new_values = []
-    for _, row in df.iterrows():
+    updated = 0
+    for idx, row in df.iterrows():
         key = _row_lookup_key(row, key_columns)
-        new_values.append(source_values.get(key, row[dst_col]))
-    df[dst_col] = new_values
+        src = source_rows.get(key)
+        if not src:
+            continue
+        for col_name, val in src.items():
+            if col_name not in df.columns:
+                continue
+            if isinstance(val, (int, float)) and not isinstance(val, bool):
+                df.at[idx, col_name] = val
+                updated += 1
+    if updated:
+        print(f"  Applied visible Excel values to rate cells ({updated} updates)")
     return df
+
+
+def read_source_column_values(
+    file_path: Path,
+    sheet_name: str,
+    column_name: str,
+    key_columns: list[str],
+) -> dict[tuple[str, ...], object]:
+    """Read visible workbook values for one column, keyed by shipment columns."""
+    bulk = read_visible_sheet_values(
+        file_path, sheet_name, key_columns, [column_name]
+    )
+    return {key: vals.get(column_name) for key, vals in bulk.items()}
+
+
+def apply_visible_origin_handling_fee(
+    df: pd.DataFrame,
+    file_path: Path,
+    sheet_name: str,
+    key_labels: list[str] | None = None,
+) -> pd.DataFrame:
+    """Overwrite Origin handling fee min with visible source workbook values."""
+    return apply_visible_rate_values(df, file_path, sheet_name, key_labels)
+
+
+# Backwards-compatible alias
+apply_exact_origin_handling_fee = apply_visible_origin_handling_fee
 
 
 # ---------------------------------------------------------------------------
@@ -833,19 +934,14 @@ def build_excel(df: pd.DataFrame, shipment_cols: list[str],
 
             flat_val = None
             punit_val = None
-            skip_round = normalize(cost.display_name) == "origin handling fee"
 
             if cost.has_flat:
                 src = cost._min_actual if cost.has_min else cost._flat_actual
                 if src and src in df.columns:
-                    flat_val = numeric_rate_value(
-                        df.iloc[row_idx][src], skip_round=skip_round
-                    )
+                    flat_val = numeric_rate_value(df.iloc[row_idx][src])
 
             if cost.has_punit and cost._unit_actual and cost._unit_actual in df.columns:
-                punit_val = numeric_rate_value(
-                    df.iloc[row_idx][cost._unit_actual], skip_round=skip_round
-                )
+                punit_val = numeric_rate_value(df.iloc[row_idx][cost._unit_actual])
 
             if flat_val is None and punit_val is None:
                 continue
@@ -1034,7 +1130,7 @@ def get_flow2_costs() -> list[CostDef]:
 
 
 def flow_qty_pct(df_processed: pd.DataFrame, df_original: pd.DataFrame,
-                 xlsx: pd.ExcelFile, file_path: Path, source_sheet: str):
+                 xlsx: pd.ExcelFile, file_path: Path):
     df_original = df_original.copy()
     # Add Currency from original before any row filtering
     if not find_col(list(df_processed.columns), "Currency"):
@@ -1078,10 +1174,6 @@ def flow_qty_pct(df_processed: pd.DataFrame, df_original: pd.DataFrame,
             print(f"  Removed {before - len(df_processed)} LCL rows ({len(df_processed)} remaining)")
         else:
             pass
-
-    df_processed = apply_exact_origin_handling_fee(
-        df_processed, file_path, source_sheet, SHIPMENT_INFO_FLOW2
-    )
 
     # Rename equipment type values
     equip_col_f2 = find_col(list(df_processed.columns), "Equipment type")
@@ -1390,6 +1482,8 @@ if __name__ == "__main__":
     df_processed = process(df_original, xlsx)
     print(f"  Ready — {len(df_processed)} rows x {len(df_processed.columns)} cols")
 
+    df_processed = apply_visible_rate_values(df_processed, file_path, source_sheet)
+
     suggested = detect_flow(file_path)
 
     print("\nAvailable flows:")
@@ -1410,7 +1504,7 @@ if __name__ == "__main__":
     if flow_choice == "1":
         output_path = flow_lcl(df_processed, df_original, file_path, xlsx)
     elif flow_choice == "2":
-        output_path = flow_qty_pct(df_processed, df_original, xlsx, file_path, source_sheet)
+        output_path = flow_qty_pct(df_processed, df_original, xlsx, file_path)
     elif flow_choice == "3":
         output_path = flow_multiplier(df_processed, df_original, file_path)
     else:
